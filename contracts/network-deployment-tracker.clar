@@ -4,8 +4,11 @@
 (define-constant ERR_INVALID_NETWORK (err u400))
 (define-constant ERR_DEPLOYMENT_EXISTS (err u409))
 (define-constant ERR_INVALID_STATUS (err u422))
+(define-constant ERR_TEMPLATE_NOT_FOUND (err u404))
+(define-constant ERR_TEMPLATE_EXISTS (err u409))
 
 (define-data-var deployment-counter uint u0)
+(define-data-var template-counter uint u0)
 
 (define-map deployments 
   { deployment-id: uint }
@@ -51,6 +54,24 @@
 (define-map network-deployment-count
   { network-id: uint }
   uint
+)
+
+(define-map deployment-templates
+  { template-id: uint }
+  {
+    template-name: (string-ascii 64),
+    description: (string-ascii 256),
+    contract-name-pattern: (string-ascii 64),
+    network-id: uint,
+    estimated-gas: uint,
+    estimated-cost: uint,
+    default-tags: (list 5 (string-ascii 32)),
+    creator: principal,
+    created-at: uint,
+    updated-at: uint,
+    is-public: bool,
+    usage-count: uint
+  }
 )
 
 (define-public (register-network (network-id uint) (network-name (string-ascii 32)) (network-chain-id uint) (rpc-endpoint (string-ascii 128)) (is-testnet bool))
@@ -183,6 +204,129 @@
   )
 )
 
+(define-public (create-template
+  (template-name (string-ascii 64))
+  (description (string-ascii 256))
+  (contract-name-pattern (string-ascii 64))
+  (network-id uint)
+  (estimated-gas uint)
+  (estimated-cost uint)
+  (default-tags (list 5 (string-ascii 32)))
+  (is-public bool)
+)
+  (let (
+    (template-id (+ (var-get template-counter) u1))
+    (current-block stacks-block-height)
+  )
+    (match (map-get? network-registry { network-id: network-id })
+      network-data
+      (begin
+        (asserts! (get is-active network-data) ERR_INVALID_NETWORK)
+        (var-set template-counter template-id)
+        (ok (map-set deployment-templates
+          { template-id: template-id }
+          {
+            template-name: template-name,
+            description: description,
+            contract-name-pattern: contract-name-pattern,
+            network-id: network-id,
+            estimated-gas: estimated-gas,
+            estimated-cost: estimated-cost,
+            default-tags: default-tags,
+            creator: tx-sender,
+            created-at: current-block,
+            updated-at: current-block,
+            is-public: is-public,
+            usage-count: u0
+          }
+        ))
+      )
+      ERR_INVALID_NETWORK
+    )
+  )
+)
+
+(define-public (update-template
+  (template-id uint)
+  (template-name (string-ascii 64))
+  (description (string-ascii 256))
+  (contract-name-pattern (string-ascii 64))
+  (estimated-gas uint)
+  (estimated-cost uint)
+  (default-tags (list 5 (string-ascii 32)))
+  (is-public bool)
+)
+  (match (map-get? deployment-templates { template-id: template-id })
+    template-data
+    (begin
+      (asserts! (or (is-eq tx-sender (get creator template-data)) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+      (ok (map-set deployment-templates
+        { template-id: template-id }
+        (merge template-data {
+          template-name: template-name,
+          description: description,
+          contract-name-pattern: contract-name-pattern,
+          estimated-gas: estimated-gas,
+          estimated-cost: estimated-cost,
+          default-tags: default-tags,
+          is-public: is-public,
+          updated-at: stacks-block-height
+        })
+      ))
+    )
+    ERR_TEMPLATE_NOT_FOUND
+  )
+)
+
+(define-public (create-deployment-from-template
+  (template-id uint)
+  (contract-name (string-ascii 64))
+  (contract-address (string-ascii 64))
+  (deployment-hash (string-ascii 64))
+  (actual-gas uint)
+  (actual-cost uint)
+)
+  (match (map-get? deployment-templates { template-id: template-id })
+    template-data
+    (begin
+      (asserts! (or (get is-public template-data) (is-eq tx-sender (get creator template-data)) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+      (let (
+        (deployment-id (+ (var-get deployment-counter) u1))
+        (current-block stacks-block-height)
+        (network-data (unwrap! (map-get? network-registry { network-id: (get network-id template-data) }) ERR_INVALID_NETWORK))
+      )
+        (var-set deployment-counter deployment-id)
+        (map-set deployments
+          { deployment-id: deployment-id }
+          {
+            contract-name: contract-name,
+            contract-address: contract-address,
+            network-id: (get network-id template-data),
+            network-name: (get network-name network-data),
+            deployer: tx-sender,
+            deployment-hash: deployment-hash,
+            status: "pending",
+            gas-used: actual-gas,
+            deployment-cost: actual-cost,
+            created-at: current-block,
+            updated-at: current-block,
+            is-verified: false,
+            tags: (get default-tags template-data)
+          }
+        )
+        (map-set deployment-templates
+          { template-id: template-id }
+          (merge template-data { usage-count: (+ (get usage-count template-data) u1) })
+        )
+        (update-deployer-stats tx-sender actual-gas actual-cost)
+        (increment-network-count (get network-id template-data))
+        (ok deployment-id)
+      )
+    )
+    ERR_TEMPLATE_NOT_FOUND
+  )
+)
+
 (define-private (update-deployer-stats (deployer principal) (gas-used uint) (cost uint))
   (let (
     (current-stats (default-to 
@@ -229,6 +373,37 @@
 
 (define-read-only (get-deployment-counter)
   (var-get deployment-counter)
+)
+
+(define-read-only (get-template (template-id uint))
+  (map-get? deployment-templates { template-id: template-id })
+)
+
+(define-read-only (get-template-counter)
+  (var-get template-counter)
+)
+
+(define-read-only (get-public-templates)
+  (let (
+    (template-ids (list 
+      u1 u2 u3 u4 u5 u6 u7 u8 u9 u10
+      u11 u12 u13 u14 u15 u16 u17 u18 u19 u20
+    ))
+  )
+    (filter filter-public-templates 
+      (map get-template-with-id template-ids))
+  )
+)
+
+(define-read-only (get-templates-by-creator (creator principal))
+  (let (
+    (template-ids (list 
+      u1 u2 u3 u4 u5 u6 u7 u8 u9 u10
+      u11 u12 u13 u14 u15 u16 u17 u18 u19 u20
+    ))
+  )
+    (map get-template-with-id template-ids)
+  )
 )
 
 (define-read-only (get-deployments-by-status (target-status (string-ascii 16)))
@@ -297,3 +472,20 @@
     false
   )
 )
+
+(define-private (get-template-with-id (template-id uint))
+  {
+    template-id: template-id,
+    data: (map-get? deployment-templates { template-id: template-id })
+  }
+)
+
+(define-private (filter-public-templates (template-entry { template-id: uint, data: (optional { template-name: (string-ascii 64), description: (string-ascii 256), contract-name-pattern: (string-ascii 64), network-id: uint, estimated-gas: uint, estimated-cost: uint, default-tags: (list 5 (string-ascii 32)), creator: principal, created-at: uint, updated-at: uint, is-public: bool, usage-count: uint }) }))
+  (match (get data template-entry)
+    template-data
+    (get is-public template-data)
+    false
+  )
+)
+
+
