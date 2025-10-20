@@ -10,6 +10,9 @@
 (define-constant ERR_ALREADY_APPROVED (err u409))
 (define-constant ERR_ALREADY_REJECTED (err u409))
 (define-constant ERR_INSUFFICIENT_APPROVALS (err u403))
+(define-constant ERR_VERSION_NOT_FOUND (err u404))
+(define-constant ERR_INVALID_VERSION (err u400))
+(define-constant ERR_ALREADY_ROLLED_BACK (err u409))
 
 (define-data-var deployment-counter uint u0)
 (define-data-var template-counter uint u0)
@@ -108,6 +111,31 @@
   {
     required-approvals: uint,
     authorized-approvers: (list 10 principal)
+  }
+)
+
+(define-map deployment-versions
+  { contract-identifier: (string-ascii 128) }
+  {
+    total-versions: uint,
+    active-version: uint,
+    latest-deployment-id: uint
+  }
+)
+
+(define-map version-history
+  { contract-identifier: (string-ascii 128), version: uint }
+  {
+    deployment-id: uint,
+    version-tag: (string-ascii 32),
+    is-active: bool,
+    is-rolled-back: bool,
+    rollback-reason: (optional (string-ascii 256)),
+    deployed-at: uint,
+    rolled-back-at: (optional uint),
+    rolled-back-by: (optional principal),
+    previous-version: (optional uint),
+    network-id: uint
   }
 )
 
@@ -529,6 +557,161 @@
   )
 )
 
+(define-public (register-deployment-version
+  (deployment-id uint)
+  (contract-identifier (string-ascii 128))
+  (version-tag (string-ascii 32))
+  (network-id uint)
+)
+  (match (map-get? deployments { deployment-id: deployment-id })
+    deployment-data
+    (begin
+      (asserts! (or (is-eq tx-sender (get deployer deployment-data)) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get network-id deployment-data) network-id) ERR_INVALID_NETWORK)
+      (let (
+        (current-version-info (default-to
+          { total-versions: u0, active-version: u0, latest-deployment-id: u0 }
+          (map-get? deployment-versions { contract-identifier: contract-identifier })
+        ))
+        (new-version (+ (get total-versions current-version-info) u1))
+        (previous-version (if (> (get total-versions current-version-info) u0) (some (get active-version current-version-info)) none))
+      )
+        (if (is-some previous-version)
+          (match (map-get? version-history { contract-identifier: contract-identifier, version: (unwrap-panic previous-version) })
+            prev-version-data
+            (map-set version-history
+              { contract-identifier: contract-identifier, version: (unwrap-panic previous-version) }
+              (merge prev-version-data { is-active: false })
+            )
+            true
+          )
+          true
+        )
+        (map-set deployment-versions
+          { contract-identifier: contract-identifier }
+          {
+            total-versions: new-version,
+            active-version: new-version,
+            latest-deployment-id: deployment-id
+          }
+        )
+        (ok (map-set version-history
+          { contract-identifier: contract-identifier, version: new-version }
+          {
+            deployment-id: deployment-id,
+            version-tag: version-tag,
+            is-active: true,
+            is-rolled-back: false,
+            rollback-reason: none,
+            deployed-at: stacks-block-height,
+            rolled-back-at: none,
+            rolled-back-by: none,
+            previous-version: previous-version,
+            network-id: network-id
+          }
+        ))
+      )
+    )
+    ERR_DEPLOYMENT_NOT_FOUND
+  )
+)
+
+(define-public (rollback-deployment-version
+  (contract-identifier (string-ascii 128))
+  (version uint)
+  (rollback-reason (string-ascii 256))
+)
+  (match (map-get? version-history { contract-identifier: contract-identifier, version: version })
+    version-data
+    (begin
+      (asserts! (or (is-eq tx-sender CONTRACT_OWNER) (match (map-get? deployments { deployment-id: (get deployment-id version-data) })
+        deployment-data (is-eq tx-sender (get deployer deployment-data))
+        false
+      )) ERR_NOT_AUTHORIZED)
+      (asserts! (get is-active version-data) ERR_INVALID_VERSION)
+      (asserts! (not (get is-rolled-back version-data)) ERR_ALREADY_ROLLED_BACK)
+      (let (
+        (current-version-info (unwrap! (map-get? deployment-versions { contract-identifier: contract-identifier }) ERR_VERSION_NOT_FOUND))
+        (previous-version-opt (get previous-version version-data))
+      )
+        (map-set version-history
+          { contract-identifier: contract-identifier, version: version }
+          (merge version-data {
+            is-active: false,
+            is-rolled-back: true,
+            rollback-reason: (some rollback-reason),
+            rolled-back-at: (some stacks-block-height),
+            rolled-back-by: (some tx-sender)
+          })
+        )
+        (match previous-version-opt
+          prev-version
+          (begin
+            (match (map-get? version-history { contract-identifier: contract-identifier, version: prev-version })
+              prev-version-data
+              (map-set version-history
+                { contract-identifier: contract-identifier, version: prev-version }
+                (merge prev-version-data { is-active: true })
+              )
+              true
+            )
+            (ok (map-set deployment-versions
+              { contract-identifier: contract-identifier }
+              (merge current-version-info { active-version: prev-version })
+            ))
+          )
+          (ok (map-set deployment-versions
+            { contract-identifier: contract-identifier }
+            (merge current-version-info { active-version: u0 })
+          ))
+        )
+      )
+    )
+    ERR_VERSION_NOT_FOUND
+  )
+)
+
+(define-public (promote-deployment-version
+  (contract-identifier (string-ascii 128))
+  (version uint)
+)
+  (match (map-get? version-history { contract-identifier: contract-identifier, version: version })
+    version-data
+    (begin
+      (asserts! (or (is-eq tx-sender CONTRACT_OWNER) (match (map-get? deployments { deployment-id: (get deployment-id version-data) })
+        deployment-data (is-eq tx-sender (get deployer deployment-data))
+        false
+      )) ERR_NOT_AUTHORIZED)
+      (asserts! (not (get is-rolled-back version-data)) ERR_ALREADY_ROLLED_BACK)
+      (let (
+        (current-version-info (unwrap! (map-get? deployment-versions { contract-identifier: contract-identifier }) ERR_VERSION_NOT_FOUND))
+        (current-active-version (get active-version current-version-info))
+      )
+        (if (> current-active-version u0)
+          (match (map-get? version-history { contract-identifier: contract-identifier, version: current-active-version })
+            current-active-data
+            (map-set version-history
+              { contract-identifier: contract-identifier, version: current-active-version }
+              (merge current-active-data { is-active: false })
+            )
+            true
+          )
+          true
+        )
+        (map-set version-history
+          { contract-identifier: contract-identifier, version: version }
+          (merge version-data { is-active: true })
+        )
+        (ok (map-set deployment-versions
+          { contract-identifier: contract-identifier }
+          (merge current-version-info { active-version: version })
+        ))
+      )
+    )
+    ERR_VERSION_NOT_FOUND
+  )
+)
+
 (define-private (update-deployer-stats (deployer principal) (gas-used uint) (cost uint))
   (let (
     (current-stats (default-to 
@@ -728,5 +911,3 @@
     false
   )
 )
-
-
