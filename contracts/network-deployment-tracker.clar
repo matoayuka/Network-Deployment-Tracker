@@ -904,6 +904,7 @@
   }
 )
 
+
 (define-private (filter-pending-approvals (approval-entry { approval-id: uint, data: (optional { deployment-request: { contract-name: (string-ascii 64), contract-address: (string-ascii 64), network-id: uint, deployment-hash: (string-ascii 64), gas-used: uint, deployment-cost: uint, tags: (list 5 (string-ascii 32)) }, requester: principal, required-approvals: uint, current-approvals: uint, approvers: (list 10 principal), rejectors: (list 10 principal), status: (string-ascii 16), created-at: uint, updated-at: uint, auto-execute: bool }) }))
   (match (get data approval-entry)
     approval-data
@@ -911,3 +912,4 @@
     false
   )
 )
+
