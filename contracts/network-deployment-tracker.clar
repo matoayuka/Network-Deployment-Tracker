@@ -82,6 +82,13 @@
   }
 )
 
+(define-map template-stars
+  { user: principal, template-id: uint }
+  {
+    starred-at: uint
+  }
+)
+
 (define-map deployment-approvals
   { approval-id: uint }
   {
@@ -913,3 +920,40 @@
   )
 )
 
+(define-public (star-template (template-id uint))
+  (match (map-get? deployment-templates { template-id: template-id })
+    template-data
+    (ok (map-set template-stars
+      { user: tx-sender, template-id: template-id }
+      { starred-at: stacks-block-height }
+    ))
+    ERR_TEMPLATE_NOT_FOUND
+  )
+)
+
+(define-public (unstar-template (template-id uint))
+  (begin
+    (map-delete template-stars { user: tx-sender, template-id: template-id })
+    (ok template-id)
+  )
+)
+
+(define-read-only (is-template-starred (template-id uint))
+  (is-some (map-get? template-stars { user: tx-sender, template-id: template-id }))
+)
+
+(define-read-only (get-my-starred-templates)
+  (let (
+    (template-ids (list 
+      u1 u2 u3 u4 u5 u6 u7 u8 u9 u10
+      u11 u12 u13 u14 u15 u16 u17 u18 u19 u20
+    ))
+  )
+    (filter filter-starred-by-sender 
+      (map get-template-with-id template-ids))
+  )
+)
+
+(define-private (filter-starred-by-sender (template-entry { template-id: uint, data: (optional { template-name: (string-ascii 64), description: (string-ascii 256), contract-name-pattern: (string-ascii 64), network-id: uint, estimated-gas: uint, estimated-cost: uint, default-tags: (list 5 (string-ascii 32)), creator: principal, created-at: uint, updated-at: uint, is-public: bool, usage-count: uint }) }))
+  (is-some (map-get? template-stars { user: tx-sender, template-id: (get template-id template-entry) }))
+)
